@@ -1,5 +1,5 @@
 blueprint:
-  name: Deye Inverter – Dynamic Price Battery Management
+  name: Deye Inverter Dynamic Price Battery Management
   description: >
     Automate Deye inverter battery charging and discharging based on dynamic price
     (e.g. Energi Data Service or Octopus Agile). Charges battery in cheapest hours,
@@ -30,11 +30,10 @@ blueprint:
         entity: {}
     stop_command:
       name: Stop Charge/Discharge Command
-      description: >
-        Optional – service/switch to stop charge/discharge and set inverter to self-consumption.
-      default: []
+      description: Optional â€“ service/switch to stop charge/discharge and set inverter to self-consumption.
       selector:
-        entity: {}
+        entity:
+            domain: switch
     cheap_price:
       name: Price Threshold (Cheap)
       default: 0.50
