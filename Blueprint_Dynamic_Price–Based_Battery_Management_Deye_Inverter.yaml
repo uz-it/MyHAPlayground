@@ -1,0 +1,119 @@
+blueprint:
+  name: Deye Inverter – Dynamic Price Battery Management
+  description: >
+    Automate Deye inverter battery charging and discharging based on dynamic price
+    (e.g. Energi Data Service or Octopus Agile). Charges battery in cheapest hours,
+    discharges in most expensive hours, respects SOC limits.
+  domain: automation
+  input:
+    price_sensor:
+      name: Electricity Price Sensor
+      selector:
+        entity:
+          domain: sensor
+    battery_soc:
+      name: Battery SOC Sensor
+      selector:
+        entity:
+          domain: sensor
+    charge_command:
+      name: Charge Command (service or switch)
+      description: >
+        Service or switch to start battery charging. Can be a script calling Modbus write.
+      selector:
+        entity: {}
+    discharge_command:
+      name: Discharge Command (service or switch)
+      description: >
+        Service or switch to allow battery discharge (or force to load).
+      selector:
+        entity: {}
+    stop_command:
+      name: Stop Charge/Discharge Command
+      description: >
+        Optional – service/switch to stop charge/discharge and set inverter to self-consumption.
+      default: []
+      selector:
+        entity: {}
+    cheap_price:
+      name: Price Threshold (Cheap)
+      default: 0.50
+      selector:
+        number:
+          min: -5
+          max: 5
+          step: 0.01
+          unit_of_measurement: "DKK/kWh"
+    expensive_price:
+      name: Price Threshold (Expensive)
+      default: 1.20
+      selector:
+        number:
+          min: -5
+          max: 5
+          step: 0.01
+          unit_of_measurement: "DKK/kWh"
+    min_soc:
+      name: Minimum SOC (Do not discharge below)
+      default: 20
+      selector:
+        number:
+          min: 5
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+    max_soc:
+      name: Maximum SOC (Stop charging above)
+      default: 90
+      selector:
+        number:
+          min: 5
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+mode: single
+
+trigger:
+  - platform: state
+    entity_id: !input price_sensor
+  - platform: state
+    entity_id: !input battery_soc
+
+variables:
+  price: "{{ states(price_sensor) | float(0) }}"
+  soc: "{{ states(battery_soc) | float(0) }}"
+  cheap: !input cheap_price
+  expensive: !input expensive_price
+  min_soc: !input min_soc
+  max_soc: !input max_soc
+
+condition: []
+
+action:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ price <= cheap and soc < max_soc }}"
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input charge_command
+
+      - conditions:
+          - condition: template
+            value_template: "{{ price >= expensive and soc > min_soc }}"
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input discharge_command
+
+      - conditions:
+          - condition: template
+            value_template: "{{ (price > cheap and price < expensive) or (soc >= max_soc) or (soc <= min_soc) }}"
+        sequence:
+          - choose:
+              - conditions: "{{ stop_command | length > 0 }}"
+                sequence:
+                  - service: switch.turn_on
+                    target:
+                      entity_id: !input stop_command
