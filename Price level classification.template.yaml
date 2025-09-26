@@ -1,0 +1,185 @@
+﻿{% set sensor_name = 'sensor.energi_data_service' %}
+
+{# Safely retrieve min/max attributes, defaulting to an empty dictionary ({})
+if the attribute is missing or None. This prevents crashes on '.price' access. #}
+{% set today_min_attr = state_attr(sensor_name, 'today_min') | default({}, true) %}
+{% set today_max_attr = state_attr(sensor_name, 'today_max') | default({}, true) %}
+
+{# Safely retrieve mean, defaulting to 0.0 if missing. #}
+{% set today_mean = state_attr(sensor_name, 'today_mean') | float(0) %}
+
+{# Safely extract the price from the attributes, defaulting to 0.0 if the 'price' key is missing. #}
+{% set today_min = today_min_attr.price | float(0) %}
+{% set today_max = today_max_attr.price | float(0) %}
+
+{# Safely retrieve hourly data, defaulting to an empty list ([]) if the attribute is missing. #}
+{% set today_data = state_attr(sensor_name, 'today') | default([]) %}
+
+{# --- Prepare namespace for hourly blocks (ns1) --- #}
+{% set ns1 = namespace(today_hour_blocks=[]) %}
+
+{# --- Process today data into hourly averages with new labels (ns1) --- #}
+{%- for i in range(0, today_data|length, 4) -%}
+{% set chunk = today_data[i:i+4] %}
+{% if chunk|length == 4 %}
+{% set avg_price = (chunk | map('float') | sum / 4) %}
+{% set start_time = now().strftime('%Y-%m-%d_') ~ '%02d:00' % (i // 4) %}
+{% set label = (
+'lowest' if avg_price < today_min + (today_mean - today_min)/2 else
+'medium' if avg_price >= today_mean - (today_mean - today_min)/2 and avg_price <= today_mean + (today_max - today_mean)/2 else
+'highest' if avg_price > today_max - (today_max - today_mean)/2 else
+'other'
+) %}
+{% set ns1.today_hour_blocks = ns1.today_hour_blocks + [{'start': start_time, 'hourprice': avg_price, 'label': label, 'hour_int': i // 4 * 100}] %}
+{% endif %}
+{%- endfor -%}
+
+{# --- RENAME INDIVIDUAL TRANSITIONAL 'MEDIUM' HOURS (ns1_modified) --- #}
+{% set ns1_modified = namespace(blocks=[]) %}
+{%- for i in range(ns1.today_hour_blocks | length) -%}
+{% set current = ns1.today_hour_blocks[i] %}
+{% set prev = ns1.today_hour_blocks[i-1] if i > 0 else none %}
+{% set next = ns1.today_hour_blocks[i+1] if i + 1 < ns1.today_hour_blocks | length else none %}
+
+{% set new_label = current.label %}
+
+{% if current.label == 'medium' %}
+    {% set prev_is_non_medium = (prev and prev.label != 'medium') or (not prev and current.start.split('_')[1].split(':')[0] | int == 0) %}
+    {% set next_is_non_medium = (next and next.label != 'medium') or (not next and current.start.split('_')[1].split(':')[0] | int == 23) %}
+    
+    {% if prev_is_non_medium and next_is_non_medium %}
+        {% set new_label = 'highest' %}
+    {% endif %}
+{% endif %}
+
+{% set ns1_modified.blocks = ns1_modified.blocks + [{
+    'start': current.start,
+    'hourprice': current.hourprice,
+    'label': new_label,
+    'hour_int': current.hour_int
+}] %}
+
+
+{%- endfor -%}
+
+{# --- STEP 1: INITIAL GROUPING AFTER RENAMING (ns3) --- #}
+{% set ns3 = namespace(grouped=[], current_label=None, current_hours=[]) %}
+
+{%- for hour in ns1_modified.blocks -%}
+{% set hour_int = hour.hour_int %}
+
+{% if ns3.current_label is none %}
+    {% set ns3.current_label = hour.label %}
+    {% set ns3.current_hours = [hour_int] %}
+{% elif ns3.current_label == hour.label %}
+    {% set ns3.current_hours = ns3.current_hours + [hour_int] %}
+{% else %}
+    {% set ns3.grouped = ns3.grouped + [{
+        'start': ns3.current_hours[0],
+        'label': ns3.current_label,
+        'duration': ns3.current_hours | length
+    }] %}
+    {% set ns3.current_label = hour.label %}
+    {% set ns3.current_hours = [hour_int] %}
+{% endif %}
+
+
+{%- endfor -%}
+
+{% if ns3.current_label is not none %}
+{% set ns3.grouped = ns3.grouped + [{
+'start': ns3.current_hours[0],
+'label': ns3.current_label,
+'duration': ns3.current_hours | length
+}] %}
+{% endif %}
+
+{# --- STEP 2: PRIORITIZE FIXED BLOCKS, THEN SPLIT MEDIUM TO REACH 4 (ns4) --- #}
+{% set max_count = 6 %}
+{% set target_medium_count = 4 %}
+{# ns4.grouped holds the final blocks. ns4.medium_queue holds blocks needing processing. #}
+{% set ns4 = namespace(grouped=[], medium_queue=[], final_medium_list=[], all_blocks=[]) %}
+{% set blocks_to_process = ns3.grouped %}
+
+{# PHASE 1: Separate Fixed Blocks (Lowest/Highest) and Queue Medium #}
+{%- for block in blocks_to_process -%}
+{% if block.label == 'lowest' or block.label == 'highest' %}
+{# 1. Keep fixed blocks up to max_count #}
+{% if ns4.grouped | length < max_count %}
+{% set ns4.grouped = ns4.grouped + [block] %}
+{% else %}
+{# Stop if max_count is hit by fixed blocks #}
+{% break %}
+{% endif %}
+{% else %}
+{# 2. Queue medium blocks, keeping their original order #}
+{% set ns4.medium_queue = ns4.medium_queue + [block] %}
+{% endif %}
+{%- endfor -%}
+
+{# PHASE 2: Determine Splits needed for Medium Blocks #}
+{% set medium_count_initial = ns4.medium_queue | length %}
+{% set slots_left = max_count - ns4.grouped | length %}
+
+{# Calculate required splits to reach target_medium_count (max 4) #}
+{% set splits_needed_for_target = [target_medium_count - medium_count_initial, 0] | max %}
+
+{# Calculate splits allowed by remaining slots #}
+{% set max_splits_allowed_by_slots = [slots_left - medium_count_initial, 0] | max %}
+
+{# The actual number of splits we will perform #}
+{% set splits_to_perform = [splits_needed_for_target, max_splits_allowed_by_slots] | min %}
+
+{# Identify the blocks to split: sort the queue by duration (longest first) and take the top N #}
+{% set sort_queue = ns4.medium_queue | sort(attribute='duration', reverse=true) %}
+{% set blocks_to_split = sort_queue[:splits_to_perform] %}
+{% set blocks_to_split_starts = blocks_to_split | map(attribute='start') | list %}
+
+{# Build the final list of medium blocks by splitting the selected ones #}
+{% set blocks_split_count = 0 %}
+{% set blocks_to_skip = [] %}
+
+{%- for block in ns4.medium_queue -%}
+{% set should_split = false %}
+
+{# Check if this block is one of the top N longest blocks we selected to split #}
+{% if blocks_split_count < splits_to_perform and block.start in blocks_to_split_starts and block.duration > 1 and block.start not in blocks_to_skip %}
+    {% set should_split = true %}
+    {% set blocks_to_skip = blocks_to_skip + [block.start] %} {# Mark this specific block as processed/split #}
+{% endif %}
+
+{% if should_split %}
+    
+    {# Split logic: Split as evenly as possible #}
+    {% set duration_a = (block.duration / 2) | round(0, 'floor') | int %}
+    {% set duration_b = block.duration - duration_a %}
+    
+    {% set split_block_a = {
+        'start': block.start, 
+        'label': block.label, 
+        'duration': duration_a
+    } %}
+    {% set split_block_b = {
+        'start': block.start + duration_a * 100, 
+        'label': block.label, 
+        'duration': duration_b
+    } %}
+    
+    {% set ns4.final_medium_list = ns4.final_medium_list + [split_block_a, split_block_b] %}
+    {% set blocks_split_count = blocks_split_count + 1 %}
+    
+{% else %}
+    {# If not selected for splitting, keep the original block #}
+    {% set ns4.final_medium_list = ns4.final_medium_list + [block] %}
+{% endif %}
+
+
+{%- endfor -%}
+
+{# PHASE 3: Final Assembly and SORTING #}
+{% set all_blocks = ns4.grouped + ns4.final_medium_list %}
+
+{# CRITICAL: Sort the final combined list by the 'start' attribute #}
+{% set ns4.grouped = all_blocks | sort(attribute='start') %}
+
+{{ ns4.grouped | to_json }}

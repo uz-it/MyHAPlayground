@@ -135,12 +135,21 @@ foreach ($row in $table) {
         $stats = $dayStats[$d]
         $num = [double]$cell
 
-        if ($stats.Max -ne $null -and $num -eq $stats.Max) {
-            $bg = "Red"; $fg = "White"
-        } elseif ($stats.Mid -ne $null -and $num -ge $stats.Mid) {
-            $bg = "Yellow"; $fg = "Black"
-        } else {
-            $bg = "Green"; $fg = "Black"
+        if ($stats.Min -ne $null -and $stats.Max -ne $null -and $stats.Mid -ne $null) {
+            $minHigh = $stats.Min + ($stats.Mid - $stats.Min)/2
+            $midLow  = $stats.Mid - ($stats.Mid - $stats.Min)/2 
+            $midHigh = $stats.Mid + ($stats.Max - $stats.Mid)/2
+            
+        
+            if ($num -le $minHigh) {
+                $bg = "Green"; $fg = "Black"
+            } elseif ($num -ge $midLow -and $num -le $midHigh) {
+                $bg = "Yellow"; $fg = "Black"
+            } elseif ($num -gt $midHigh) {
+                $bg = "Red"; $fg = "White"
+            } else {
+                $bg = "Gray"; $fg = "Black"  # fallback for values outside defined zones
+            }
         }
 
         $text = "{0,$colWidth}" -f ("{0:N2}" -f $num)
@@ -148,3 +157,21 @@ foreach ($row in $table) {
     }
     Write-Host ""
 }
+# ===== Add final row for daily midpoint =====
+$midRow = [ordered]@{Hour = "Mid"}
+
+foreach ($d in $dates) {
+    $midVal = $dayStats[$d].Mid
+    $midRow[$d] = if ($midVal -ne $null) { "{0:N2}" -f $midVal } else { "-" }
+}
+
+# Print the final row
+$hourCell = "{0,-$hourWidth}" -f $midRow.Hour
+Write-Host -NoNewline $hourCell
+
+foreach ($d in $dates) {
+    $cell = $midRow[$d]
+    $text = "{0,$colWidth}" -f $cell
+    Write-Host -NoNewline $text -BackgroundColor DarkGray -ForegroundColor White
+}
+Write-Host ""
